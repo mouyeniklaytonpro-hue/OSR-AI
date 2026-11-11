@@ -6,12 +6,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsc --target ES2022 --module commonjs --moduleResolution node --outDir node_modules/.cache/osr-business-brain-tests --rootDir src --noEmit false --incremental false --esModuleInterop --types node src/lib/business-brain.test.ts src/lib/strategic-business-brain.test.ts && node node_modules/.cache/osr-business-brain-tests/lib/business-brain.test.js && node node_modules/.cache/osr-business-brain-tests/lib/strategic-business-brain.test.js",
+    "test:openai": "tsc --target ES2022 --module commonjs --moduleResolution node --outDir node_modules/.cache/osr-business-brain-tests --rootDir src --noEmit false --incremental false --esModuleInterop --types node src/lib/openai-business-brain.integration.test.ts && node node_modules/.cache/osr-business-brain-tests/lib/openai-business-brain.integration.test.js"
   },
   "dependencies": {
     "next": "16.4.5",
+    "react-markdown": "^10.1.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

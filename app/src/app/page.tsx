@@ -1,68 +1,255 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  AGENT_IDS,
+  AGENT_PROFILES,
+  type AgentId,
+} from "@/lib/agents";
+import type { CompanyProfile } from "@/lib/company-profile";
+import ChatMarkdown from "./ChatMarkdown";
 
-const agents = [
-  {
-    name: "Marketing & SEO",
-    role: "Visibilite et strategie",
-    icon: "✦",
-    color: "#C6A15B",
-  },
-  {
-    name: "Content & Creative",
-    role: "Creation et communication",
-    icon: "◈",
-    color: "#8FA8D8",
-  },
-  {
-    name: "Business Strategist",
-    role: "Strategie et conseil",
-    icon: "⌘",
-    color: "#B69AE8",
-  },
-  {
-    name: "Sales & Analytics",
-    role: "Developpement commercial",
-    icon: "↗",
-    color: "#65C79B",
-  },
-  {
-    name: "Training & Executive",
-    role: "Organisation et formation",
-    icon: "◎",
-    color: "#D9A17D",
-  },
-];
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  selectedAgents?: readonly AgentId[];
+  humanApprovalRequired?: boolean;
+}
+
+interface BusinessBrainResponse {
+  answer: string;
+  mission: {
+    selectedAgents: AgentId[];
+    humanApproval: { required: boolean };
+  };
+}
+
+function isCompanyProfile(value: unknown): value is CompanyProfile {
+  if (typeof value !== "object" || value === null) return false;
+  const profile = value as Record<string, unknown>;
+  return (
+    typeof profile.id === "string" &&
+    typeof profile.name === "string" &&
+    Array.isArray(profile.services) &&
+    profile.services.every((service) => typeof service === "string") &&
+    (profile.deliveryModel === undefined ||
+      typeof profile.deliveryModel === "string")
+  );
+}
+
+function isBusinessBrainResponse(
+  value: unknown,
+): value is BusinessBrainResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const result = value as Record<string, unknown>;
+  if (
+    typeof result.answer !== "string" ||
+    typeof result.mission !== "object" ||
+    result.mission === null
+  ) {
+    return false;
+  }
+  const mission = result.mission as Record<string, unknown>;
+  return (
+    Array.isArray(mission.selectedAgents) &&
+    mission.selectedAgents.length > 0 &&
+    mission.selectedAgents.every(
+      (agentId) =>
+        typeof agentId === "string" &&
+        (AGENT_IDS as readonly string[]).includes(agentId),
+    ) &&
+    typeof mission.humanApproval === "object" &&
+    mission.humanApproval !== null &&
+    typeof (mission.humanApproval as Record<string, unknown>).required ===
+      "boolean"
+  );
+}
+
+const agentPresentation: Record<AgentId, { icon: string; color: string }> = {
+  "marketing-seo": { icon: "✦", color: "#C6A15B" },
+  "content-creative": { icon: "◈", color: "#8FA8D8" },
+  "business-strategist": { icon: "⌘", color: "#B69AE8" },
+  "sales-analytics": { icon: "↗", color: "#65C79B" },
+  "training-executive": { icon: "◎", color: "#D9A17D" },
+};
 
 const departments = [
-  { number: "01", name: "Marketing & Communication", count: "5 agents" },
-  { number: "02", name: "Conseil & Strategie", count: "4 agents" },
-  { number: "03", name: "Developpement commercial", count: "3 agents" },
-  { number: "04", name: "Creation digitale & Web", count: "4 agents" },
-  { number: "05", name: "Formation & Production", count: "4 agents" },
-];
+  { number: "01", agentId: "marketing-seo" },
+  { number: "02", agentId: "business-strategist" },
+  { number: "03", agentId: "sales-analytics" },
+  { number: "04", agentId: "content-creative" },
+  { number: "05", agentId: "training-executive" },
+] as const;
+
+const navItems = [
+  "Overview",
+  "AI Agents",
+  "Departments",
+  "Workspace",
+  "Analytics",
+  "Settings",
+] as const;
+
+type View = (typeof navItems)[number];
+
+const navIcons: Record<View, string> = {
+  Overview: "◫",
+  "AI Agents": "✧",
+  Departments: "▦",
+  Workspace: "▤",
+  Analytics: "↗",
+  Settings: "⚙",
+};
 
 export default function Home() {
-  const [active, setActive] = useState("Overview");
-  const [selectedAgent, setSelectedAgent] = useState("");
+  const [active, setActive] = useState<View>("Overview");
+  const [companyProfile, setCompanyProfile] = useState<CompanyProfile | null>(
+    null,
+  );
+  const [selectedAgent, setSelectedAgent] = useState<AgentId | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [messages, setMessages] = useState<string[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isSending, setIsSending] = useState(false);
+  const [requestError, setRequestError] = useState("");
 
-  function sendMessage() {
-    if (!prompt.trim()) return;
-    setMessages((previous) => [...previous, prompt.trim()]);
-    setPrompt("");
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadCompanyProfile() {
+      try {
+        const response = await fetch("/api/company-profile", {
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+
+        const profile: unknown = await response.json();
+        if (isCompanyProfile(profile)) setCompanyProfile(profile);
+      } catch {
+        if (!controller.signal.aborted) setCompanyProfile(null);
+      }
+    }
+
+    void loadCompanyProfile();
+    return () => controller.abort();
+  }, []);
+
+  function selectAgent(agentId: AgentId) {
+    setSelectedAgent(agentId);
+    setActive("Workspace");
   }
 
-  const navItems = [
-    "Overview",
-    "AI Agents",
-    "Departments",
-    "Workspace",
-    "Analytics",
-    "Settings",
-  ];
+  async function sendMessage() {
+    const message = prompt.trim();
+    if (!message || isSending) return;
+
+    setMessages((previous) => [...previous, { role: "user", content: message }]);
+    setPrompt("");
+    setRequestError("");
+    setIsSending(true);
+
+    try {
+      const response = await fetch("/api/business-brain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          ...(selectedAgent ? { preferredAgentId: selectedAgent } : {}),
+        }),
+      });
+
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new Error("La reponse du serveur est illisible.");
+      }
+
+      if (!response.ok) {
+        const errorMessage =
+          typeof payload === "object" &&
+          payload !== null &&
+          "error" in payload &&
+          typeof payload.error === "string"
+            ? payload.error
+            : "Le Business Brain n'a pas pu traiter la demande.";
+        throw new Error(errorMessage);
+      }
+
+      if (!isBusinessBrainResponse(payload)) {
+        throw new Error("La reponse du Business Brain est invalide.");
+      }
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: payload.answer,
+          selectedAgents: payload.mission.selectedAgents,
+          humanApprovalRequired: payload.mission.humanApproval.required,
+        },
+      ]);
+    } catch (error) {
+      setRequestError(
+        error instanceof Error
+          ? error.message
+          : "Impossible de joindre le Business Brain.",
+      );
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  const agentCards = AGENT_IDS.map((agentId) => {
+    const agent = AGENT_PROFILES[agentId];
+    const presentation = agentPresentation[agentId];
+
+    return (
+      <button
+        key={agent.name}
+        type="button"
+        aria-label={`Select ${agent.name} for Workspace`}
+        onClick={() => selectAgent(agentId)}
+        style={styles.agentCard}
+      >
+        <div
+          style={{
+            ...styles.agentIcon,
+            color: presentation.color,
+            borderColor: `${presentation.color}55`,
+          }}
+        >
+          {presentation.icon}
+        </div>
+        <h3 style={styles.agentName}>{agent.name}</h3>
+        <p style={styles.agentRole}>{agent.role}</p>
+        <div style={styles.agentFooter}>
+          <span>
+            <span style={styles.onlineDot} /> Available
+          </span>
+          <span style={{ color: "#C6A15B" }}>Select ↗</span>
+        </div>
+      </button>
+    );
+  });
+
+  const departmentRows = departments.map(({ number, agentId }) => {
+    const agent = AGENT_PROFILES[agentId];
+
+    return (
+      <div key={number} style={styles.department}>
+        <span style={styles.departmentNumber}>{number}</span>
+        <span style={styles.departmentName}>{agent.department}</span>
+        <button
+          type="button"
+          onClick={() => selectAgent(agentId)}
+          style={styles.departmentAgent}
+        >
+          {agent.name}
+        </button>
+        <span style={styles.departmentCount}>1 agent</span>
+      </div>
+    );
+  });
 
   return (
     <main style={styles.app}>
@@ -81,22 +268,16 @@ export default function Home() {
           <button
             key={item}
             onClick={() => setActive(item)}
+            type="button"
             style={{
               ...styles.navItem,
               ...(active === item ? styles.navActive : {}),
             }}
           >
-            <span>{{
-              Overview: "◫",
-              "AI Agents": "✧",
-              Departments: "▦",
-              Workspace: "▤",
-              Analytics: "↗",
-              Settings: "⚙",
-            }[item]}</span>
+            <span>{navIcons[item]}</span>
             {item}
             {item === "AI Agents" && (
-              <span style={styles.navCount}>20</span>
+              <span style={styles.navCount}>{AGENT_IDS.length}</span>
             )}
           </button>
         ))}
@@ -109,8 +290,10 @@ export default function Home() {
           <div style={styles.profile}>
             <div style={styles.avatar}>OSR</div>
             <div>
-              <div style={styles.profileName}>OSR Group</div>
-              <div style={styles.profileRole}>Administrator</div>
+              <div style={styles.profileName}>
+                {companyProfile?.name ?? "Company profile"}
+              </div>
+              <div style={styles.profileRole}>Active company profile</div>
             </div>
           </div>
         </div>
@@ -127,161 +310,280 @@ export default function Home() {
               <span style={styles.onlineDot} />
               SYSTEM ONLINE
             </div>
-            <button style={styles.headerButton}>⌕</button>
-            <button style={styles.headerButton}>⚙</button>
+            <button type="button" aria-label="Search" style={styles.headerButton}>⌕</button>
+            <button
+              type="button"
+              aria-label="Open Settings"
+              onClick={() => setActive("Settings")}
+              style={styles.headerButton}
+            >
+              ⚙
+            </button>
           </div>
         </header>
 
         <div style={styles.content}>
-          <section style={styles.hero}>
-            <div>
-              <div style={styles.eyebrow}>
-                <span style={{color:"#C6A15B"}}>✦</span>
-                PREMIUM AI BUSINESS WORKSPACE
-              </div>
-              <h2 style={styles.heroTitle}>
-                Your business.
-                <br />
-                <span style={{color:"#C6A15B"}}>Your intelligence.</span>
-              </h2>
-              <p style={styles.heroText}>
-                Centralisez vos operations, pilotez vos agents IA
-                et developpez votre activite depuis un espace unique.
-              </p>
-            </div>
-            <div style={styles.heroOrb}>
-              <div style={styles.orbInner}>ØSR</div>
-            </div>
-          </section>
-
-          <div style={styles.stats}>
-            {[
-              ["20", "AI AGENTS", "+5 departments"],
-              ["05", "DEPARTMENTS", "Business divisions"],
-              ["24/7", "AVAILABILITY", "Always operational"],
-              ["01", "WORKSPACE", "Centralized platform"],
-            ].map(([value, label, detail]) => (
-              <div key={label} style={styles.statCard}>
-                <div style={styles.statValue}>{value}</div>
-                <div style={styles.statLabel}>{label}</div>
-                <div style={styles.statDetail}>{detail}</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={styles.sectionHeading}>
-            <div>
-              <div style={styles.sectionEyebrow}>INTELLIGENCE NETWORK</div>
-              <h2 style={styles.sectionTitle}>Your AI Agents</h2>
-            </div>
-            <button
-              style={styles.outlineButton}
-              onClick={() => setActive("AI Agents")}
-            >
-              View all agents →
-            </button>
-          </div>
-
-          <div style={styles.agentGrid}>
-            {agents.map((agent) => (
-              <button
-                key={agent.name}
-                onClick={() => {
-                  setSelectedAgent(agent.name);
-                  setActive("Workspace");
-                }}
-                style={styles.agentCard}
-              >
-                <div style={{
-                  ...styles.agentIcon,
-                  color: agent.color,
-                  borderColor: agent.color + "55",
-                }}>
-                  {agent.icon}
-                </div>
-                <h3 style={styles.agentName}>{agent.name}</h3>
-                <p style={styles.agentRole}>{agent.role}</p>
-                <div style={styles.agentFooter}>
-                  <span><span style={styles.onlineDot}/> Available</span>
-                  <span style={{color:"#C6A15B"}}>↗</span>
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <div style={styles.sectionHeading}>
-            <div>
-              <div style={styles.sectionEyebrow}>BUSINESS ORGANIZATION</div>
-              <h2 style={styles.sectionTitle}>Departments</h2>
-            </div>
-          </div>
-
-          <div style={styles.departmentList}>
-            {departments.map((department) => (
-              <div key={department.number} style={styles.department}>
-                <span style={styles.departmentNumber}>{department.number}</span>
-                <span style={styles.departmentName}>{department.name}</span>
-                <span style={styles.departmentCount}>{department.count}</span>
-                <span style={{color:"#C6A15B"}}>→</span>
-              </div>
-            ))}
-          </div>
-
-          <section style={styles.brain}>
-            <div style={styles.brainHeader}>
-              <div>
-                <div style={styles.sectionEyebrow}>OSR INTELLIGENCE</div>
-                <h2 style={styles.sectionTitle}>AI Command Center</h2>
-              </div>
-              <span style={styles.status}>
-                <span style={styles.onlineDot}/> READY
-              </span>
-            </div>
-
-            {selectedAgent && (
-              <div style={styles.selectedAgent}>
-                Agent selectionne : {selectedAgent}
-              </div>
-            )}
-
-            <div style={styles.chat}>
-              {messages.length === 0 ? (
-                <div style={styles.emptyChat}>
-                  <div style={{fontSize:30,color:"#C6A15B"}}>✧</div>
-                  <h3 style={{color:"#F5F0E8"}}>How can OSR help you?</h3>
-                  <p style={{color:"#8995A8"}}>
-                    Posez une question ou decrivez votre prochain projet.
+          {active === "Overview" && (
+            <>
+              <section style={styles.hero}>
+                <div>
+                  <div style={styles.eyebrow}>
+                    <span style={{ color: "#C6A15B" }}>✦</span>
+                    PREMIUM AI BUSINESS WORKSPACE
+                  </div>
+                  <h2 style={styles.heroTitle}>
+                    Your business.
+                    <br />
+                    <span style={{ color: "#C6A15B" }}>Your intelligence.</span>
+                  </h2>
+                  <p style={styles.heroText}>
+                    Centralisez vos operations, pilotez vos agents IA
+                    et developpez votre activite depuis un espace unique.
                   </p>
                 </div>
-              ) : (
-                messages.map((message, index) => (
-                  <div key={index} style={styles.message}>
-                    <span style={{color:"#C6A15B"}}>YOU</span>
-                    <p>{message}</p>
-                  </div>
-                ))
-              )}
-            </div>
+                <div style={styles.heroOrb}>
+                  <div style={styles.orbInner}>ØSR</div>
+                </div>
+              </section>
 
-            <div style={styles.inputArea}>
-              <input
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") sendMessage();
-                }}
-                placeholder="Describe your business objective..."
-                style={styles.input}
-              />
-              <button onClick={sendMessage} style={styles.sendButton}>
-                SEND ↗
-              </button>
-            </div>
-            <p style={styles.disclaimer}>
-              Interface de demonstration. Le moteur IA et les integrations
-              seront connectes dans une prochaine etape.
-            </p>
-          </section>
+              <div style={styles.stats}>
+                {[
+                  [String(AGENT_IDS.length), "AI AGENTS", `+${departments.length} departments`],
+                  [String(departments.length).padStart(2, "0"), "DEPARTMENTS", "Business divisions"],
+                  ["24/7", "AVAILABILITY", "Always operational"],
+                  ["01", "WORKSPACE", "Centralized platform"],
+                ].map(([value, label, detail]) => (
+                  <div key={label} style={styles.statCard}>
+                    <div style={styles.statValue}>{value}</div>
+                    <div style={styles.statLabel}>{label}</div>
+                    <div style={styles.statDetail}>{detail}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>INTELLIGENCE NETWORK</div>
+                  <h2 style={styles.sectionTitle}>Your AI Agents</h2>
+                </div>
+                <button
+                  type="button"
+                  style={styles.outlineButton}
+                  onClick={() => setActive("AI Agents")}
+                >
+                  View all agents →
+                </button>
+              </div>
+
+              <div style={styles.agentGrid}>{agentCards}</div>
+
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>BUSINESS ORGANIZATION</div>
+                  <h2 style={styles.sectionTitle}>Departments</h2>
+                </div>
+              </div>
+
+              <div style={styles.departmentList}>{departmentRows}</div>
+            </>
+          )}
+
+          {active === "AI Agents" && (
+            <>
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>INTELLIGENCE NETWORK</div>
+                  <h2 style={styles.sectionTitle}>Your AI Agents</h2>
+                </div>
+              </div>
+              <div style={styles.agentGrid}>{agentCards}</div>
+            </>
+          )}
+
+          {active === "Departments" && (
+            <>
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>BUSINESS ORGANIZATION</div>
+                  <h2 style={styles.sectionTitle}>Departments</h2>
+                </div>
+              </div>
+              <div style={styles.departmentList}>{departmentRows}</div>
+            </>
+          )}
+
+          {active === "Workspace" && (
+            <section style={styles.brain}>
+              <div style={styles.brainHeader}>
+                <div>
+                  <div style={styles.sectionEyebrow}>OSR INTELLIGENCE</div>
+                  <h2 style={styles.sectionTitle}>AI Command Center</h2>
+                </div>
+                <span style={styles.status}>
+                  <span style={styles.onlineDot} /> READY
+                </span>
+              </div>
+
+              <div style={styles.selectedAgent}>
+                {selectedAgent
+                  ? `Agent selectionne : ${AGENT_PROFILES[selectedAgent].name}`
+                  : "Le Business Brain selectionnera les agents adaptes a votre demande."}
+              </div>
+
+              <div style={styles.chat}>
+                {messages.length === 0 ? (
+                  <div style={styles.emptyChat}>
+                    <div style={{ fontSize: 30, color: "#C6A15B" }}>✧</div>
+                    <h3 style={{ color: "#F5F0E8" }}>How can OSR help you?</h3>
+                    <p style={{ color: "#8995A8" }}>
+                      Posez une question ou decrivez votre prochain projet.
+                    </p>
+                  </div>
+                ) : (
+                  messages.map((message, index) => (
+                    <div key={index} style={styles.message}>
+                      <span style={{ color: "#C6A15B" }}>
+                        {message.role === "user"
+                          ? "YOU"
+                          : `OSR-AI${message.selectedAgents ? ` · ${message.selectedAgents.map((agentId) => AGENT_PROFILES[agentId].name).join(", ")}` : ""}`}
+                      </span>
+                      {message.role === "assistant" ? (
+                        <ChatMarkdown content={message.content} />
+                      ) : (
+                        <p style={{ whiteSpace: "pre-wrap" }}>
+                          {message.content}
+                        </p>
+                      )}
+                      {message.humanApprovalRequired && (
+                        <p role="note" style={styles.approvalNotice}>
+                          Validation humaine requise avant toute action externe.
+                        </p>
+                      )}
+                    </div>
+                  ))
+                )}
+                {requestError && (
+                  <p role="alert" style={styles.errorMessage}>
+                    {requestError}
+                  </p>
+                )}
+                {isSending && (
+                  <p role="status" style={styles.loadingMessage}>
+                    Le Business Brain prepare une reponse...
+                  </p>
+                )}
+              </div>
+
+              <div style={styles.inputArea}>
+                <input
+                  value={prompt}
+                  disabled={isSending}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void sendMessage();
+                  }}
+                  placeholder="Describe your business objective..."
+                  style={styles.input}
+                />
+                <button
+                  type="button"
+                  onClick={() => void sendMessage()}
+                  disabled={isSending || !prompt.trim()}
+                  style={styles.sendButton}
+                >
+                  {isSending ? "SENDING..." : "SEND ↗"}
+                </button>
+              </div>
+              <p style={styles.disclaimer}>
+                Les recommandations sont generees avec OpenAI. Toute action
+                externe reste soumise a une validation humaine.
+              </p>
+            </section>
+          )}
+
+          {active === "Analytics" && (
+            <>
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>BUSINESS INTELLIGENCE</div>
+                  <h2 style={styles.sectionTitle}>Analytics</h2>
+                </div>
+              </div>
+              <p style={styles.pageDescription}>
+                Donnees de configuration disponibles et indicateurs qui ne
+                peuvent pas encore etre mesures.
+              </p>
+              <h3 style={styles.subsectionTitle}>Available configuration data</h3>
+              <div style={styles.infoGrid}>
+                {[
+                  ["AI agents", String(AGENT_IDS.length), "Agents configured in the application"],
+                  ["Departments", String(departments.length), "Departments configured in the application"],
+                  ["Workspaces", "1", "Configured workspace"],
+                ].map(([label, value, detail]) => (
+                  <div key={label} style={styles.infoCard}>
+                    <div style={styles.infoLabel}>{label}</div>
+                    <div style={styles.statValue}>{value}</div>
+                    <div style={styles.infoDetail}>{detail}</div>
+                  </div>
+                ))}
+              </div>
+              <h3 style={styles.subsectionTitle}>Not available yet</h3>
+              <div style={styles.infoGrid}>
+                {[
+                  "Agent usage and activity",
+                  "Conversation volume",
+                  "Business performance and conversions",
+                ].map((metric) => (
+                  <div key={metric} style={styles.unavailableCard}>
+                    <div style={styles.infoLabel}>{metric}</div>
+                    <div style={styles.unavailableValue}>Not available</div>
+                    <div style={styles.infoDetail}>
+                      Requires the AI engine and data integrations, which are
+                      not connected yet.
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {active === "Settings" && (
+            <>
+              <div style={styles.sectionHeading}>
+                <div>
+                  <div style={styles.sectionEyebrow}>APPLICATION CONFIGURATION</div>
+                  <h2 style={styles.sectionTitle}>Settings</h2>
+                </div>
+              </div>
+              <p style={styles.pageDescription}>
+                Current application configuration and integration status.
+              </p>
+              <div style={styles.settingsList}>
+                {[
+                  ["Application", "OSR-AI", "Intelligence System"],
+                  [
+                    "Company profile",
+                    companyProfile?.name ?? "Loading profile...",
+                    companyProfile?.services.join(" · ") ?? "",
+                  ],
+                  [
+                    "Delivery model",
+                    companyProfile?.deliveryModel ?? "Loading profile...",
+                    "Current active company profile",
+                  ],
+                  ["Appearance", "Dark theme", "Gold accent"],
+                  ["AI engine", "OpenAI", "Server-side integration via OPENAI_API_KEY"],
+                  ["Integrations", "Not connected", "Planned for a future step"],
+                ].map(([label, value, detail]) => (
+                  <div key={label} style={styles.settingRow}>
+                    <span style={styles.infoLabel}>{label}</span>
+                    <span style={styles.settingValue}>{value}</span>
+                    <span style={styles.infoDetail}>{detail}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           <footer style={styles.footer}>
             <span>OSR-AI © 2026</span>
@@ -361,7 +663,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 9,
     color: "#8995A8",
     fontSize: 10,
-    marginBottom: 20,
+    marginBottom: 5,
   },
   onlineDot: {
     display: "inline-block",
@@ -376,7 +678,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 10,
     alignItems: "center",
     borderTop: "1px solid #202B3D",
-    paddingTop: 20,
+    paddingTop: 5,
   },
   avatar: {
     background: "#C6A15B",
@@ -462,7 +764,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#101827",
     border: "1px solid #202B3D",
     borderRadius: 10,
-    padding: 20,
+    padding: 5,
   },
   statValue: { color: "#C6A15B", fontSize: 27, fontWeight: 700 },
   statLabel: { fontSize: 10, letterSpacing: 1.5, marginTop: 9 },
@@ -471,7 +773,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 20,
+    marginBottom: 5,
     marginTop: 35,
   },
   sectionEyebrow: { fontSize: 9, letterSpacing: 2, color: "#C6A15B" },
@@ -536,6 +838,14 @@ const styles: Record<string, React.CSSProperties> = {
   departmentNumber: { color: "#C6A15B", fontSize: 11 },
   departmentName: { flex: 1 },
   departmentCount: { color: "#8995A8", fontSize: 10 },
+  departmentAgent: {
+    background: "transparent",
+    border: "none",
+    color: "#C6A15B",
+    cursor: "pointer",
+    fontSize: 10,
+    textAlign: "left",
+  },
   brain: {
     background: "#101827",
     border: "1px solid #28374B",
@@ -560,15 +870,18 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: 150,
     maxHeight: 260,
     overflowY: "auto",
-    padding: 20,
-    marginTop: 20,
+    padding: 5,
+    marginTop: 5,
   },
-  emptyChat: { textAlign: "center", padding: 20 },
+  emptyChat: { textAlign: "center", padding: 5 },
   message: {
     borderBottom: "1px solid #202B3D",
     padding: 12,
     fontSize: 12,
   },
+  errorMessage: { color: "#F08A8A", fontSize: 11, padding: "0 12px" },
+  loadingMessage: { color: "#8995A8", fontSize: 11, padding: "0 12px" },
+  approvalNotice: { color: "#C6A15B", fontSize: 11, marginTop: 10 },
   inputArea: { display: "flex", gap: 10, marginTop: 15 },
   input: {
     flex: 1,
@@ -592,6 +905,64 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 10,
   },
   disclaimer: { color: "#66748A", fontSize: 9, marginTop: 12 },
+  pageDescription: {
+    color: "#8995A8",
+    fontSize: 12,
+    lineHeight: 1.7,
+    margin: "15px 0 25px",
+  },
+  subsectionTitle: {
+    color: "#F5F0E8",
+    fontSize: 13,
+    fontWeight: 600,
+    margin: "28px 0 12px",
+  },
+  infoGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3,minmax(0,1fr))",
+    gap: 12,
+  },
+  infoCard: {
+    background: "#101827",
+    border: "1px solid #202B3D",
+    borderRadius: 10,
+    padding: 18,
+  },
+  infoLabel: { color: "#8995A8", fontSize: 10, letterSpacing: 0.5 },
+  infoDetail: {
+    color: "#8995A8",
+    fontSize: 10,
+    lineHeight: 1.6,
+    marginTop: 8,
+  },
+  unavailableCard: {
+    background: "#101827",
+    border: "1px solid #202B3D",
+    borderRadius: 10,
+    padding: 18,
+    minHeight: 125,
+  },
+  unavailableValue: {
+    color: "#C6A15B",
+    fontSize: 16,
+    fontWeight: 600,
+    marginTop: 12,
+  },
+  settingsList: {
+    background: "#101827",
+    border: "1px solid #202B3D",
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  settingRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 1fr) minmax(150px, 1fr) minmax(180px, 2fr)",
+    alignItems: "center",
+    gap: 15,
+    padding: "17px 20px",
+    borderBottom: "1px solid #202B3D",
+  },
+  settingValue: { color: "#F5F0E8", fontSize: 12 },
   footer: {
     display: "flex",
     justifyContent: "space-between",
@@ -600,7 +971,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 9,
     letterSpacing: 1.5,
     padding: "30px 0",
-    marginTop: 20,
+    marginTop: 5,
     borderTop: "1px solid #202B3D",
   },
 };
